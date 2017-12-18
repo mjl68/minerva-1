@@ -39,7 +39,8 @@ export default Panel.extend({
         'click .action-bar button.remove-bounds': 'removeBounds',
         'click .action-bar button.toggle-bounds-label': 'toggleBoundsLabel',
         'click .action-bar button.intersect-filter': 'intersectFilter',
-        'click .action-bar button.remove-filter': 'removeFilter'
+        'click .action-bar button.remove-filter': 'removeFilter',
+        'click .action-bar .dropdown li': 'gaiaProcessClicked'
     },
 
     toggleCategories: function (event) {
@@ -291,6 +292,8 @@ export default Panel.extend({
         this.showSharedDatasets = !!this.sessionModel.getValue('showSharedDatasets');
         this.selectedDatasetsId = new Set();
         this.filters = {};
+        this.gaiaProcesses = [];
+        this.loadGaiaProcesses();
         this.listenTo(this.collection, 'g:changed', function () {
             this.render();
         }, this).listenTo(this.collection, 'change', function () {
@@ -508,6 +511,60 @@ export default Panel.extend({
 
     getSourceName(model) {
         return (((model.get('meta') || {}).minerva || {}).source || {}).layer_source;
+    },
+
+    loadGaiaProcesses() {
+        restRequest({
+            path: 'gaia_process/classes',
+            type: 'GET'
+        }).done((data) => {
+            this.gaiaProcesses = data.processes
+                .filter((process) => {
+                    var processValue = Object.values(process)[0];
+                    return processValue.required_inputs.length === 1 &&
+                        processValue.required_inputs[0].type === 'vector' &&
+                        processValue.required_args.length === 0;
+                }).map((process) => {
+                    var processName = Object.keys(process)[0];
+                    var formattedProcessName = processName.split('.').pop().split(/(?=[A-Z])/).join(' ');
+                    return { title: formattedProcessName, processMeta: process };
+                });
+            this.render();
+        });
+    },
+
+    gaiaProcessClicked(e) {
+        var process = this.gaiaProcesses[$(e.currentTarget).data('index')];
+        bootbox.prompt({
+            title: 'New dataset name?',
+            value: process.title.split(' ')[0],
+            callback: (name) => {
+                if (name !== null) {
+                    this.selectedDatasetsId.forEach((datsetId) => {
+                        var request = {
+                            datasetName: name,
+                            process: {
+                                _type: Object.keys(process.processMeta)[0],
+                                inputs: [
+                                    {
+                                        _type: 'gaia_tasks.inputs.MinervaVectorIO',
+                                        item_id: datsetId
+                                    }
+                                ]
+                            }
+                        };
+                        restRequest({
+                            path: 'gaia_analysis',
+                            type: 'POST',
+                            contentType: 'application/json',
+                            data: JSON.stringify(request)
+                        }).done(_.bind(function () {
+                            events.trigger('m:job.created');
+                        }, this));
+                    });
+                }
+            }
+        });
     },
 
     render() {
