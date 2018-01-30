@@ -15,6 +15,7 @@ import DatasetInfoWidget from '../widgets/DatasetInfoWidget';
 import PostgresWidget from '../widgets/PostgresWidget';
 import template from '../../templates/body/dataPanel.pug';
 import '../../stylesheets/body/dataPanel.styl';
+import GaiaProcessWidget from '../widgets/GaiaProcessWidget';
 
 export default Panel.extend({
     events: {
@@ -23,6 +24,7 @@ export default Panel.extend({
         'click .remove_dataset-from-session': 'removeDatasetFromSession',
         'click .m-upload-local': 'uploadDialog',
         'click .m-postgres': 'connectToPostgres',
+        'click .m-boundary-dataset': 'drawBoundaryDataset',
         'click .delete-dataset': 'deleteDatasetEvent',
         'click .m-display-dataset-table': 'displayTableDataset',
         'click .dataset-info': 'displayDatasetInfo',
@@ -36,7 +38,10 @@ export default Panel.extend({
         'click .action-bar button.toggle-shared': 'toggleShared',
         'click .action-bar button.show-bounds': 'showBounds',
         'click .action-bar button.remove-bounds': 'removeBounds',
-        'click .action-bar button.toggle-bounds-label': 'toggleBoundsLabel'
+        'click .action-bar button.toggle-bounds-label': 'toggleBoundsLabel',
+        'click .action-bar button.intersect-filter': 'intersectFilter',
+        'click .action-bar button.remove-filter': 'removeFilter',
+        'click .action-bar .dropdown li': 'gaiaProcessClicked'
     },
 
     toggleCategories: function (event) {
@@ -65,6 +70,10 @@ export default Panel.extend({
             }, this).fetch();
         });
         postgresWidget.render();
+    },
+
+    drawBoundaryDataset() {
+        events.trigger('m:draw-boundary-dataset');
     },
 
     /**
@@ -149,6 +158,7 @@ export default Panel.extend({
         }
         this.newDataset.on('m:dataset_promoted', function () {
             this.collection.add(this.newDataset);
+            this.filters = {};
         }, this).on('g:error', function (err) {
             console.error(err);
         }).promoteToDataset(params);
@@ -272,6 +282,7 @@ export default Panel.extend({
     },
     initialize: function (settings) {
         this.allChecked = this.allChecked.bind(this);
+        this._ = _;
         this.deletableSelectedDatasets = this.deletableSelectedDatasets.bind(this);
         this.sharableSelectedDatasets = this.sharableSelectedDatasets.bind(this);
         var externalId = 1;
@@ -281,6 +292,9 @@ export default Panel.extend({
         this.visibleMenus = {};
         this.showSharedDatasets = !!this.sessionModel.getValue('showSharedDatasets');
         this.selectedDatasetsId = new Set();
+        this.filters = {};
+        this.gaiaProcesses = [];
+        this.loadGaiaProcesses();
         this.listenTo(this.collection, 'g:changed', function () {
             this.render();
         }, this).listenTo(this.collection, 'change', function () {
@@ -345,6 +359,29 @@ export default Panel.extend({
 
             this.collection.add(dataset);
         }, this);
+
+        this.listenTo(events, 'm:dataset-drawn', (name, geometry) => {
+            var geometryStr = JSON.stringify(geometry);
+            return restRequest({
+                type: 'POST',
+                url: `file?parentType=folder&parentId=${this.collection.folderId}&name=${name}.geojson&size=${geometryStr.length}`,
+                contentType: 'application/json',
+                data: geometryStr
+            }).then((file) => {
+                return restRequest({
+                    type: 'GET',
+                    url: `item/${file.itemId}`
+                });
+            }).then((item) => {
+                var dataset = new DatasetModel(item);
+                return dataset.promoteToDataset({});
+            }).then((dataset) => {
+                var minervaMeta = dataset.getMinervaMetadata();
+                minervaMeta.category = 'Boundary';
+                this.collection.add(dataset);
+                dataset.saveMinervaMetadata(minervaMeta);
+            });
+        });
 
         eventStream.on('g:event.job_status', _.bind(function (event) {
             var status = window.parseInt(event.data.status);
@@ -443,13 +480,107 @@ export default Panel.extend({
         events.trigger('m:toggle-bounds-label');
     },
 
-    render() {
-        var sourceName = (model) => {
-            return (((model.get('meta') || {}).minerva || {}).source || {}).layer_source;
-        };
+    intersectFilter() {
+        var dataset = this.collection.get(this.selectedDatasetsId.values().next().value);
+        this._getDatasetBounds(dataset)
+            .then(({ datsaet, bounds }) => {
+                var filterBounds = bounds;
+                _whenAll(
+                    this.collection
+                        .filter(this.getSourceName)
+                        .map((dataset) => this._getDatasetBounds(dataset))
+                ).then((results) => {
+                    function check(bounds1, bounds2) {
+                        return ((bounds1.ulx <= bounds2.lrx && bounds1.ulx >= bounds2.ulx) ||
+                            (bounds1.lrx <= bounds2.lrx && bounds1.lrx >= bounds2.ulx)) &&
+                            ((bounds1.uly <= bounds2.uly && bounds1.uly >= bounds2.lry) ||
+                                (bounds1.lry <= bounds2.uly && bounds1.lry >= bounds2.lry));
+                    }
+                    this.filters.intersect = results.filter(({ dataset, bounds }) => {
+                        return check(bounds, filterBounds) || check(filterBounds, bounds);
+                    }).map(({ dataset }) => dataset.get('_id'));
+                    this.clearSelection();
+                    this.render();
+                });
+            });
+    },
 
+    removeFilter() {
+        this.filters = {};
+        this.render();
+    },
+
+    getSourceName(model) {
+        return (((model.get('meta') || {}).minerva || {}).source || {}).layer_source;
+    },
+
+    loadGaiaProcesses() {
+        restRequest({
+            path: 'gaia_process/classes',
+            type: 'GET'
+        }).done((data) => {
+            this.gaiaProcesses = data.processes
+                .map((process) => {
+                    var processName = Object.keys(process)[0];
+                    var formattedProcessName = processName.split('.').pop().split(/(?=[A-Z])/).join(' ');
+                    return { title: formattedProcessName, processMeta: process };
+                });
+            this.render();
+        });
+    },
+
+    gaiaProcessClicked(e) {
+        var process = this.gaiaProcesses[$(e.currentTarget).data('index')];
+        var processAttributes = Object.values(process.processMeta)[0];
+        // If the process requires only one dataset and no parameter run it directly
+        if (processAttributes.required_inputs.length === 1 &&
+            processAttributes.required_inputs[0].type === 'vector' &&
+            processAttributes.required_args.length === 0) {
+            bootbox.prompt({
+                title: 'New dataset name?',
+                value: process.title.split(' ')[0],
+                callback: (name) => {
+                    if (name !== null) {
+                        this.selectedDatasetsId.forEach((datsetId) => {
+                            var request = {
+                                datasetName: name,
+                                process: {
+                                    _type: Object.keys(process.processMeta)[0],
+                                    inputs: [
+                                        {
+                                            _type: 'gaia_tasks.inputs.MinervaVectorIO',
+                                            item_id: datsetId
+                                        }
+                                    ]
+                                }
+                            };
+                            restRequest({
+                                path: 'gaia_analysis',
+                                type: 'POST',
+                                contentType: 'application/json',
+                                data: JSON.stringify(request)
+                            }).done(_.bind(function () {
+                                events.trigger('m:job.created');
+                            }, this));
+                        });
+                    }
+                }
+            });
+        } else {
+            new GaiaProcessWidget({
+                el: $('#g-dialog-container'),
+                parentView: this,
+                datasetCollection: this.collection,
+                processes: this.gaiaProcesses,
+                selectedProcess: process,
+                datasetsId: this.selectedDatasetsId
+            }).render();
+        }
+    },
+
+    render() {
         this.sourceCategoryDataset = _.chain(this.collection.models)
-            .filter(sourceName)
+            .filter(this.getSourceName)
             .filter((dataset) => {
                 if (this.showSharedDatasets) {
                     return true;
@@ -457,7 +588,15 @@ export default Panel.extend({
                     return dataset.get('creatorId') === this.currentUser.id;
                 }
             })
-            .groupBy(sourceName)
+            .filter((dataset) => {
+                if (_.isEmpty(this.filters)) {
+                    return true;
+                }
+                var includeIds = Object.values(this.filters).reduce((set, ids) => { ids.forEach(set.add, set); return set; }, new Set());
+                // console.log(includeIds.values());
+                return includeIds.has(dataset.get('_id'));
+            })
+            .groupBy(this.getSourceName)
             .mapObject((datasets, key) => {
                 return _.groupBy(datasets, (dataset) => {
                     return dataset.get('meta').minerva.category || 'Other';
