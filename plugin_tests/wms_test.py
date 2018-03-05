@@ -49,8 +49,8 @@ def tearDownModule():
 def wms_mock(url, request):
     pluginTestDir = os.path.dirname(os.path.realpath(__file__))
     filepath = os.path.join(pluginTestDir, 'data', 'wms_capabilities.xml.gz')
-    with gzip.open(filepath, 'rb') as bsve_search_file:
-        content = bsve_search_file.read()
+    with gzip.open(filepath, 'rb') as search_file:
+        content = search_file.read()
         headers = {
             'content-length': len(content),
             'content-type': 'application/xml'
