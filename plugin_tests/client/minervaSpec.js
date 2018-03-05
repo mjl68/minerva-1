@@ -329,3 +329,19 @@ describe('Layerpanel', function () {
         expect(zoom).not.toEqual(mapPanel.map.zoom());
     });
 });
+
+describe('Mappanel', function () {
+    it('Take screenshot', function () {
+        $('button.m-screenshot').click();
+        waitsFor(function () {
+            return $('.m-screenshot-result').length;
+        }, 'screenshot be taken and shown');
+        runs(function () {
+            var screenshotResult = $('.m-screenshot-result');
+            var image = screenshotResult.find('img').attr('src');
+            var image2 = screenshotResult.find('a.save').attr('href');
+            expect(image).toEqual(image2);
+            expect(image.startsWith('data:image/png;base64,')).toBe(true);
+        });
+    });
+});

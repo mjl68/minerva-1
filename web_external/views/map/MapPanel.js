@@ -8,6 +8,8 @@ import Panel from '../body/Panel';
 import registry from '../adapters/registry';
 import FeatureInfoWidget from '../widgets/FeatureInfoWidget';
 import template from '../../templates/body/mapPanel.pug';
+import screenshotButtonTemplate from '../../templates/widgets/screenshotButton.pug';
+import ScreenshotResultWidget from '../widgets/ScreenshotResultWidget';
 import '../../stylesheets/body/mapPanel.styl';
 
 const MapPanel = Panel.extend({
@@ -139,6 +141,12 @@ const MapPanel = Panel.extend({
                 position: {
                     right: 10,
                     top: 45
+                }
+            });
+            this.screenshotWidget = this.uiLayer.createWidget('dom', {
+                position: {
+                    right: 18,
+                    bottom: 200
                 }
             });
             this.mapCreated = true;
@@ -422,6 +430,20 @@ const MapPanel = Panel.extend({
             trigger: 'hover'
         };
         this.$('.m-save-current-baselayer').tooltip(tooltipProperties);
+
+        var screenshotButtonContainer = $(this.screenshotWidget.canvas());
+        screenshotButtonContainer.empty().append(screenshotButtonTemplate());
+        screenshotButtonContainer.find('button').on('click', () => {
+            var layers = this.map.layers().filter((layer) => layer.layerName !== 'ui');
+            this.map.screenshot(layers, { wait: 'idle' }).then((image) => {
+                new ScreenshotResultWidget({
+                    image,
+                    el: $('#g-dialog-container'),
+                    parentView: this
+                }).render();
+            });
+        });
+
         return this;
     }
 });
